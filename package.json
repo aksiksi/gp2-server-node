@@ -1,0 +1,7 @@
+{
+  "name": "gp2-server",
+  "version": "0.0.1",
+  "dependencies": {
+    "mongodb": 
+  }
+}
