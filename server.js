@@ -1,58 +1,83 @@
 // Imports
 var net = require('net');
+var http = require('http');
+var util = require('util');
 var MongoClient = require('mongodb').MongoClient;
 
 // Configuration
 const DB_URL = 'mongodb://localhost:27017/testing';
+const NOMATIM_API = 'nominatim.openstreetmap.org';
+const NOMATIM_REVERSE = '/reverse?format=json&lon=%d&lat=%d';
 
-var findRoad = function (parsed, db, callback) {
+// Database query handler
+var findRoad = (parsed, db, callback) => {
+  // Final response
   var resp = {'online': 1};
 
-  const coords = db.collection('coords');
+  const lat = parsed.lat;
+  const lng = parsed.lng;
 
-  // Query the coordinates
-  const q = {
-    lat: {$gt: parsed.lat-0.1, $lt: parsed.lat+0.1},
-    lng: {$gt: parsed.lng-0.1, $lt: parsed.lng+0.1}
+  // API request options
+  var options = {
+    hostname: NOMATIM_API,
+    path: util.format(NOMATIM_REVERSE, lng, lat),
+    headers: {
+      'User-Agent': 'UAEU Senior Project in EE'
+    }
   };
 
-  console.log(q);
+  // Make request to Nomatim API
+  http.get(options, res => {
+    var data = '';
 
-  // Query coords collection
-  coords.findOne(q, {fields: {'_id': 0, 'road_id': 1}}, function (err, coord) {
-    if (err == null) {
-      if (coord != null) {
-        console.log(coord);
+    res.on('data', chunk => data += chunk.toString());
+    res.on('error', e => console.log(e.message));
 
-        const roads = db.collection('roads');
+    res.on('end', () => {
+      // Extract street name from response
+      var r = JSON.parse(data);
+      var osmID, streetName;
 
-        roads.findOne({"_id": {$eq: coord.road_id}}, function (err, road) {
-          if (err == null) {
-            if (road != null) {
-              resp['found'] = 1;
-              resp['name'] = road.name;
-              resp['speed'] = road.speed;
-
-              callback(resp);
-            }
-          } else {
-            resp['online'] = 0;
-            callback(resp);
-          }
-        });
-      } else {
-        resp['found'] = 0;
+      // If reverse geocoding fails, return server offline
+      try {
+        osmID = r.osm_id;
+        streetName = r.address.road;
+      } catch (e) {
+        console.log(e);
+        resp.online = 0;
         callback(resp);
       }
-    } else {
-      console.log(err);
-      resp['online'] = 0;
-      callback(resp);
-    }
-  });
+
+      // Perform query on roads collection using `osm_id`
+      var roads = db.collection('roads');
+
+      roads.findOne({'osm_id': osmID}, (err, road) => {
+        // Read error
+        if (err != null) {
+          console.log(err);
+          resp.online = 0;
+          callback(resp);
+        }
+
+        // Road not in DB
+        if (road == null) {
+          resp.found = 0;
+          callback(resp);
+        }
+
+        // Success
+        resp.found = 1;
+        resp.name = road.name;
+        resp.speed = road.speed;
+
+        callback(resp);
+      });
+    });
+  }).on('error', e => console.log(e.message));
 };
 
-var processRequest = function (req, conn) {
+// TCP request handler
+var processRequest = (req, conn) => {
   var parsed;
   var valid = true;
 
@@ -63,47 +88,48 @@ var processRequest = function (req, conn) {
     if (!parsed.lat || !parsed.lng) {
       throw Error();
     }
-  } catch (err) {
+  } catch (e) {
+    console.log(e.message);
     valid = false;
   }
 
   if (valid) {
-    MongoClient.connect(DB_URL, function (err, db) {
-      if (err == null) {
-        findRoad(parsed, db, function (resp) {
-          conn.write(JSON.stringify(resp));
-          db.close();
-        });
-      }
-      else {
-        // Server offline
+    MongoClient.connect(DB_URL, (err, db) => {
+      // Database offline
+      if (err != null) {
         conn.write(JSON.stringify({'online': 0}));
         db.close();
+        return;
       }
+      
+      findRoad(parsed, db, resp => {
+        conn.write(JSON.stringify(resp));
+        db.close();
+      });
     });
   }
 };
 
 // TCP server
 var c = 0;
-
-var server = net.createServer(function (conn) {
+var server = net.createServer(conn => {
   var client = ++c;
 
   console.log('Client ' + client + ' connected!');
 
-  conn.on('data', function(chunk) {
-    console.log(chunk.toString());
-    processRequest(chunk, conn);
+  conn.on('data', chunk => {
+    var clean = chunk.toString().trim();
+
+    console.log(clean);
+    processRequest(clean, conn);
   });
 
-  // Req fully received; process it
-  conn.on('end', function () {
+  conn.on('end', () => {
     console.log('Client ' + client + ' disconnected!');
     conn.end();
   });
 });
 
-server.listen(8080, function() {
+server.listen(8080, () => {
   console.log('Listening...');
 });
