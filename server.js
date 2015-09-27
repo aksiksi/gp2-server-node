@@ -4,83 +4,68 @@ var http = require('http');
 var util = require('util');
 var MongoClient = require('mongodb').MongoClient;
 
-// Configuration
+// Database configuration
 const DB_URL = 'mongodb://localhost:27017/testing';
-const NOMATIM_API = 'nominatim.openstreetmap.org';
-const NOMATIM_REVERSE = '/reverse?format=json&lon=%d&lat=%d';
+const ROADS = 'roads';
+const SEGMENTS = 'segments';
 
-// Database query handler
+// UDP server configuration
+const HOSTNAME = '0.0.0.0';
+const PORT = 8080;
+
+// Default Response object
+const RESPONSE = {online: 1, found: 0, speed: -1, name: ""};
+var newResponse = () => JSON.parse(JSON.stringify(RESPONSE));
+
 var findRoad = (parsed, db, callback) => {
-  // Final response
-  var resp = {'online': 1};
+  const resp = newResponse();
 
-  const lat = parsed.lat;
-  const lng = parsed.lng;
+  // GeoJSON coordinate representation
+  const loc = {
+    type: 'Point',
+    coordinates: [parsed.lng, parsed.lat]
+  };
 
-  // API request options
-  var options = {
-    hostname: NOMATIM_API,
-    path: util.format(NOMATIM_REVERSE, lng, lat),
-    headers: {
-      'User-Agent': 'UAEU Senior Project in EE'
+  var segments = db.collection(SEGMENTS);
+
+  // Perform query on SEGMENTS collection
+  // Find the road segment that contains Point `loc`
+  const q = {
+    shape: {
+      $geoIntersects: {
+        $geometry: loc
+      }
     }
   };
 
-  // Make request to Nomatim API
-  http.get(options, res => {
-    var data = '';
+  segments.findOne(q, {speed: 1, road_id: 1, _id: 0}, (err, segment) => {
+    if (err != null) {
+      // Collection read error
+      console.log(err);
+      resp.online = 0;
+      callback(resp);
+    } else if (segment == null) {
+      // No segment match!
+      callback(resp);
+    } else {
+      // Segment match!
+      var roads = db.collection(ROADS);
 
-    res.on('data', chunk => data += chunk.toString());
-
-    res.on('end', () => {
-      // Extract street name from response
-      var r = JSON.parse(data);
-      var osmID, streetName;
-
-      // If reverse geocoding fails, return server offline
-      try {
-        osmID = r.osm_id;
-        streetName = r.address.road;
-      } catch (e) {
-        console.log(e);
-        resp.online = 0;
-        callback(resp);
-        return;
-      }
-
-      // Perform query on roads collection using `osm_id`
-      var roads = db.collection('roads');
-
-      roads.findOne({'osm_id': osmID}, (err, road) => {
-        // Read error
-        if (err != null) {
+      // Find road name using road_id
+      roads.findOne({_id: segment.road_id}, (err, road) => {
+        if (err != null || road == null) {
+          // Read error, return what we have
           console.log(err);
-          resp.online = 0;
-          callback(resp);
-          return;
+          resp.name = "";
+        } else {
+          resp.found = 1;
+          resp.speed = segment.speed;
+          resp.name = road.name;
         }
-
-        // Road not in DB
-        if (road == null) {
-          resp.found = 0;
-          callback(resp);
-          return;
-        }
-
-        // Success
-        resp.found = 1;
-        resp.name = road.name;
-        resp.speed = road.speed;
 
         callback(resp);
       });
-    });
-  })
-  .on('error', e => {
-    // HTTP request failed
-    console.log(e.message);
-    resp.online = 0;
-    callback(resp);
+    }
   });
 };
 
@@ -90,8 +75,17 @@ var processRequest = (req, remote, socket) => {
   var valid = true;
 
   var sendResponse = resp => {
-    var b = new Buffer(resp);
-    socket.send(resp, 0, resp.length, remote.port, remote.address);
+    // Shorten response keys to save 16 bytes
+    var short = {
+      o: resp.online,
+      f: resp.found,
+      s: resp.speed,
+      n: resp.name
+    };
+
+    // TODO: Perhaps add a single byte XOR key for basic encryption?
+    const b = new Buffer(JSON.stringify(short));
+    socket.send(b, 0, b.length, remote.port, remote.address);
   };
 
   try {
@@ -108,17 +102,18 @@ var processRequest = (req, remote, socket) => {
 
   if (valid) {
     MongoClient.connect(DB_URL, (err, db) => {
-      // Database offline
       if (err != null) {
-        sendResponse(JSON.stringify({'online': 0}));
+        // Database offline
+        var resp = newResponse();
+        resp.online = 0;
+        sendResponse(resp);
         db.close();
-        return;
+      } else {
+        findRoad(parsed, db, resp => {
+          sendResponse(resp);
+          db.close();
+        });
       }
-
-      findRoad(parsed, db, resp => {
-        sendResponse(JSON.stringify(resp));
-        db.close();
-      });
     });
   }
 };
@@ -127,10 +122,10 @@ var processRequest = (req, remote, socket) => {
 var socket = dgram.createSocket('udp4');
 var c = 0;
 
-socket.bind(8080, '127.0.0.1');
+socket.bind(PORT, HOSTNAME);
 
 socket.on('listening', () => {
-  console.log('Listening on 8080...');
+  console.log('Listening on ' + PORT + '...');
 });
 
 socket.on('message', (req, remote) => {
