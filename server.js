@@ -1,5 +1,5 @@
 // Imports
-var net = require('net');
+var dgram = require('dgram');
 var http = require('http');
 var util = require('util');
 var MongoClient = require('mongodb').MongoClient;
@@ -31,7 +31,6 @@ var findRoad = (parsed, db, callback) => {
     var data = '';
 
     res.on('data', chunk => data += chunk.toString());
-    res.on('error', e => console.log(e.message));
 
     res.on('end', () => {
       // Extract street name from response
@@ -46,6 +45,7 @@ var findRoad = (parsed, db, callback) => {
         console.log(e);
         resp.online = 0;
         callback(resp);
+        return;
       }
 
       // Perform query on roads collection using `osm_id`
@@ -57,12 +57,14 @@ var findRoad = (parsed, db, callback) => {
           console.log(err);
           resp.online = 0;
           callback(resp);
+          return;
         }
 
         // Road not in DB
         if (road == null) {
           resp.found = 0;
           callback(resp);
+          return;
         }
 
         // Success
@@ -73,7 +75,13 @@ var findRoad = (parsed, db, callback) => {
         callback(resp);
       });
     });
-  }).on('error', e => console.log(e.message));
+  })
+  .on('error', e => {
+    // HTTP request failed
+    console.log(e.message);
+    resp.online = 0;
+    callback(resp);
+  });
 };
 
 // TCP request handler
@@ -81,12 +89,16 @@ var processRequest = (req, conn) => {
   var parsed;
   var valid = true;
 
+  var sendResponse = resp => {
+    conn.write(resp);
+  }
+
   try {
     parsed = JSON.parse(req);
 
     // Check for correct params
     if (!parsed.lat || !parsed.lng) {
-      throw Error();
+      throw Error("Invalid request structure.");
     }
   } catch (e) {
     console.log(e.message);
@@ -97,13 +109,13 @@ var processRequest = (req, conn) => {
     MongoClient.connect(DB_URL, (err, db) => {
       // Database offline
       if (err != null) {
-        conn.write(JSON.stringify({'online': 0}));
+        sendResponse(JSON.stringify({'online': 0}));
         db.close();
         return;
       }
-      
+
       findRoad(parsed, db, resp => {
-        conn.write(JSON.stringify(resp));
+        sendResponse(JSON.stringify(resp));
         db.close();
       });
     });
@@ -112,10 +124,11 @@ var processRequest = (req, conn) => {
 
 // TCP server
 var c = 0;
+
 var server = net.createServer(conn => {
   var client = ++c;
 
-  console.log('Client ' + client + ' connected!');
+  console.log('Phone ' + client + ' connected!');
 
   conn.on('data', chunk => {
     var clean = chunk.toString().trim();
@@ -125,11 +138,11 @@ var server = net.createServer(conn => {
   });
 
   conn.on('end', () => {
-    console.log('Client ' + client + ' disconnected!');
+    console.log('Phone ' + client + ' disconnected!');
     conn.end();
   });
 });
 
 server.listen(8080, () => {
-  console.log('Listening...');
+  console.log('Listening on 8080...');
 });
