@@ -2,6 +2,6 @@
   "name": "gp2-server",
   "version": "0.0.1",
   "dependencies": {
-    "mongodb": 
+    "mongodb": "^2.0.43"
   }
 }
